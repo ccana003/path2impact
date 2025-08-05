@@ -9,7 +9,9 @@ import re
 from bs4 import BeautifulSoup
 import nltk
 from datetime import datetime
-import time
+from openai import OpenAI
+import matplotlib.pyplot as plt
+from sklearn.metrics import cohen_kappa_score
 
 nltk.download('punkt')
 
@@ -50,8 +52,6 @@ if upload_option == "Upload PDF files":
 else:
     folder_path = st.text_input("Enter the folder path containing PDFs")
 
-enable_redcap_upload = st.checkbox("Upload processed PDFs to REDCap")
-
 st.markdown("---")
 
 # ==============================================
@@ -64,7 +64,6 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 CACHE_FILE = os.path.join(CACHE_DIR, "scoring_cache.csv")
 
-# Initialize cache
 if os.path.exists(CACHE_FILE):
     scoring_cache = pd.read_csv(CACHE_FILE)
 else:
@@ -73,15 +72,9 @@ else:
 
 
 def extract_sections(text):
-    """Extract PDF text into sections (from ai_script.py)"""
-    sections = {
-        "Introduction": "",
-        "Methods": "",
-        "Results": "",
-        "Discussion": "",
-        "Acknowledgments": "",
-        "Funding": ""
-    }
+    sections = {k: "" for k in [
+        "Introduction", "Methods", "Results", "Discussion", "Acknowledgments", "Funding"
+    ]}
     lines = text.split('\n')
     current = None
     for line in lines:
@@ -106,20 +99,15 @@ def extract_sections(text):
 
 
 def extract_text_from_pdf(pdf_path):
-    """Extracts all text from PDF"""
     try:
         with fitz.open(pdf_path) as doc:
-            text = ""
-            for page in doc:
-                text += page.get_text()
-        return text
+            return "".join([page.get_text() for page in doc])
     except Exception as e:
         st.error(f"Error extracting text from {pdf_path}: {e}")
         return ""
 
 
 def generate_prompt(principle_name, subcat, scoring, keywords, sections, where_to_search):
-    """Generate GPT prompt for scoring"""
     search_parts = [s.strip() for s in where_to_search.split(";")]
     collected_text = ""
     for part in search_parts:
@@ -148,7 +136,6 @@ Rationale: <your reasoning>
 
 
 def get_cached_score(file, principle, subcat):
-    """Retrieve cached score if available"""
     row = scoring_cache[
         (scoring_cache["File"] == file) &
         (scoring_cache["Principle"] == principle) &
@@ -160,7 +147,6 @@ def get_cached_score(file, principle, subcat):
 
 
 def save_to_cache(file, principle, subcat, score, rationale):
-    """Save a new score to cache"""
     global scoring_cache
     new_row = pd.DataFrame([{
         "File": file,
@@ -174,7 +160,6 @@ def save_to_cache(file, principle, subcat, score, rationale):
 
 
 def dummy_openai_score(prompt):
-    """Placeholder scoring for testing skip_ai mode"""
     return "Score: 1\nRationale: Placeholder scoring for testing."
 
 
@@ -185,7 +170,6 @@ if st.button("🚀 Run Analysis"):
     if not rubric_files:
         st.error("Please upload at least one rubric CSV.")
     else:
-        # Collect PDFs
         if upload_option == "Upload PDF files" and uploaded_files:
             tmp_dir = tempfile.mkdtemp()
             for uploaded_file in uploaded_files:
@@ -202,39 +186,28 @@ if st.button("🚀 Run Analysis"):
         else:
             st.success(f"Found {len(pdf_files)} PDF files. Starting analysis...")
 
-            # Load rubrics
-            rubrics = []
-            for rfile in rubric_files:
-                df = pd.read_csv(rfile)
-                principle_name = os.path.splitext(rfile.name)[0]
-                rubrics.append((principle_name, df))
+            client = None
+            if not skip_ai:
+                client = OpenAI(api_key=openai_api_key)
 
-            full_results = []
-            summary_results = []
+            rubrics = [(os.path.splitext(rfile.name)[0], pd.read_csv(rfile)) for rfile in rubric_files]
+            full_results, summary_results = [], []
 
             total_tasks = len(pdf_files) * sum(len(df) for _, df in rubrics)
-            progress_bar = st.progress(0)
-            log_placeholder = st.empty()
+            progress_bar, log_placeholder = st.progress(0), st.empty()
             task_count = 0
 
             for pdf_file in pdf_files:
                 pdf_name = os.path.basename(pdf_file)
-                text = extract_text_from_pdf(pdf_file)
+                text, sections = extract_text_from_pdf(pdf_file), None
                 sections = extract_sections(text)
 
                 for principle_name, rubric_df in rubrics:
-                    total_score = 0
-                    subcat_scores = []
+                    total_score, subcat_scores = 0, []
 
                     for _, row in rubric_df.iterrows():
-                        subcat = row["Subcategory"]
-                        scoring = row["Scoring Criteria"]
-                        keywords = row["Keywords"]
-                        where = row["Where to Search"]
-
-                        # Update log
+                        subcat, scoring, keywords, where = row["Subcategory"], row["Scoring Criteria"], row["Keywords"], row["Where to Search"]
                         log_placeholder.write(f"Processing {pdf_name} → {principle_name}:{subcat}")
-
                         score, rationale = get_cached_score(pdf_name, principle_name, subcat)
 
                         if score is None:
@@ -242,16 +215,13 @@ if st.button("🚀 Run Analysis"):
                                 ai_output = dummy_openai_score("prompt")
                             else:
                                 prompt = generate_prompt(principle_name, subcat, scoring, keywords, sections, where)
-                                import openai
-                                openai.api_key = openai_api_key
-                                response = openai.ChatCompletion.create(
-                                    model="gpt-4",
+                                response = client.chat.completions.create(
+                                    model="gpt-4-turbo",
                                     messages=[{"role": "user", "content": prompt}],
                                     temperature=0
                                 )
-                                ai_output = response['choices'][0]['message']['content']
+                                ai_output = response.choices[0].message.content
 
-                            # Parse output
                             try:
                                 lines = ai_output.strip().splitlines()
                                 score_line = [l for l in lines if l.lower().startswith("score")][0]
@@ -274,11 +244,9 @@ if st.button("🚀 Run Analysis"):
                             "Rationale": rationale
                         })
 
-                        # Update progress
                         task_count += 1
                         progress_bar.progress(task_count / total_tasks)
 
-                    # Save principle-level score
                     summary_results.append({
                         "File": pdf_name,
                         "Principle": principle_name,
@@ -286,90 +254,92 @@ if st.button("🚀 Run Analysis"):
                         "Subcategory Breakdown": "; ".join(subcat_scores)
                     })
 
-            # Save outputs
-            full_df = pd.DataFrame(full_results)
             summary_df = pd.DataFrame(summary_results)
+            st.session_state['ai_summary_df'] = summary_df.copy()
+            pivot_df = summary_df.pivot(index="File", columns="Principle", values="Total Score").reset_index()
+            st.session_state['ai_pivot_df'] = pivot_df.copy()
 
-            full_csv = os.path.join(OUTPUT_DIR, "full_scoring_results.csv")
-            summary_csv = os.path.join(OUTPUT_DIR, "principle_scores.csv")
-            full_df.to_csv(full_csv, index=False)
-            summary_df.to_csv(summary_csv, index=False)
+            st.success("✅ Analysis complete! Results stored in session state.")
+            st.subheader("Summary (Wide Form: One Row Per PDF)")
+            st.dataframe(pivot_df)
 
-            st.success(f"✅ Analysis complete! Results saved to {full_csv} and {summary_csv}")
-            st.dataframe(summary_df)
+# ==============================================
+# 4. COHEN'S KAPPA (Always Visible)
+# ==============================================
+st.markdown("---")
+st.header("📊 Step 4: Optional - Compare with Human Ratings")
 
-            # -------------------------------
-            # CSV Download Buttons
-            # -------------------------------
-            st.markdown("### ⬇️ Download Results")
+human_file = st.file_uploader("Upload human rater CSV (optional)", type=["csv"])
 
-            # Convert DataFrames to CSV for download
-            full_csv_bytes = full_df.to_csv(index=False).encode('utf-8')
-            summary_csv_bytes = summary_df.to_csv(index=False).encode('utf-8')
+if human_file:
+    if 'ai_summary_df' not in st.session_state:
+        st.warning("⚠️ Please run AI analysis first before uploading human ratings.")
+    else:
+        human_df = pd.read_csv(human_file)
+        st.write("Preview of Human Ratings:")
+        st.dataframe(human_df.head())
 
-            st.download_button(
-                label="Download Full Scoring Results (CSV)",
-                data=full_csv_bytes,
-                file_name="full_scoring_results.csv",
-                mime="text/csv"
-            )
+        if 'File' not in human_df.columns and 'publication' in human_df.columns:
+            human_df.rename(columns={'publication': 'File'}, inplace=True)
 
-            st.download_button(
-                label="Download Principle Scores (CSV)",
-                data=summary_csv_bytes,
-                file_name="principle_scores.csv",
-                mime="text/csv"
-            )
-            
-            # -------------------------------
-            # Cohen's Kappa Comparison (Optional)
-            # -------------------------------
-            st.markdown("---")
-            st.header("📊 Step 4: Optional - Compare with Human Ratings")
+        if 'Principle' not in human_df.columns:
+            human_long = human_df.melt(id_vars=['File'], var_name='Principle', value_name='Human Score')
+        else:
+            human_long = human_df.copy()
+            if 'Human Score' not in human_long.columns:
+                last_col = human_long.columns[-1]
+                human_long.rename(columns={last_col: 'Human Score'}, inplace=True)
 
-            human_file = st.file_uploader("Upload human rater CSV (optional)", type=["csv"])
-            
-            if human_file:
-                human_df = pd.read_csv(human_file)
-                st.write("Preview of Human Ratings:")
-                st.dataframe(human_df.head())
+        human_long = human_long.dropna(subset=['Human Score'])
+        human_long['File'] = human_long['File'].astype(str).str.strip().str.replace("\\", "/", regex=False).str.replace(" ", "_")
+        summary_df = st.session_state['ai_summary_df'].copy()
+        summary_df['File'] = summary_df['File'].astype(str).str.strip().str.replace("\\", "/", regex=False).str.replace(" ", "_")
 
-                # Merge AI and Human scores
-                compare_df = pd.merge(
-                    summary_df,
-                    human_df,
-                    on=["File", "Principle"],
-                    how="inner"
-                ).rename(columns={"Total Score": "AI Score"})
+        compare_df = pd.merge(summary_df, human_long, on=["File", "Principle"], how="inner").rename(columns={"Total Score": "AI Score"})
+        st.session_state['compare_df'] = compare_df
 
-                st.subheader("Side-by-Side Comparison")
-                st.dataframe(compare_df)
+        if not compare_df.empty:
+            st.subheader("Side-by-Side Comparison")
+            st.dataframe(compare_df)
 
-                # Compute Cohen's Kappa for each principle
-                from sklearn.metrics import cohen_kappa_score
+            kappa_results = []
+            for principle in compare_df["Principle"].unique():
+                subset = compare_df[compare_df["Principle"] == principle]
+                kappa = cohen_kappa_score(subset["AI Score"], subset["Human Score"])
+                kappa_results.append({"Principle": principle, "Cohen's Kappa": round(kappa, 3)})
 
-                kappa_results = []
-                for principle in compare_df["Principle"].unique():
-                    subset = compare_df[compare_df["Principle"] == principle]
-                    kappa = cohen_kappa_score(subset["AI Score"], subset["Human Score"])
-                    kappa_results.append({
-                        "Principle": principle,
-                        "Cohen's Kappa": round(kappa, 3)
-                    })
+            kappa_df = pd.DataFrame(kappa_results)
+            st.subheader("Cohen's Kappa by Principle")
+            st.dataframe(kappa_df)
 
-                kappa_df = pd.DataFrame(kappa_results)
-                st.subheader("Cohen's Kappa by Principle")
-                st.dataframe(kappa_df)
+            overall_kappa = cohen_kappa_score(compare_df["AI Score"], compare_df["Human Score"])
+            st.success(f"Overall Cohen's Kappa: {round(overall_kappa, 3)}")
 
-                # Overall Kappa
-                overall_kappa = cohen_kappa_score(compare_df["AI Score"], compare_df["Human Score"])
-                st.success(f"Overall Cohen's Kappa: {round(overall_kappa, 3)}")
+            # Visualization
+            st.subheader("📊 Cohen's Kappa Visualization")
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.bar(kappa_df["Principle"], kappa_df["Cohen's Kappa"], color='skyblue', label="Per Principle Kappa")
+            ax.axhline(overall_kappa, color='red', linestyle='--', label=f"Overall Kappa ({overall_kappa:.3f})")
+            ax.axhline(0.3, color='green', linestyle=':', label='Significance Threshold (0.3)')
+            ax.set_ylabel("Cohen's Kappa")
+            ax.set_xlabel("Principle")
+            ax.set_ylim(-0.1, 1.0)
+            ax.set_title("Cohen's Kappa Agreement by Principle")
+            plt.xticks(rotation=45, ha='right')
+            ax.legend()
+            st.pyplot(fig)
 
-                # Optionally download comparison table
-                compare_csv = compare_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download AI vs Human Comparison (CSV)",
-                    data=compare_csv,
-                    file_name="ai_vs_human_comparison.csv",
-                    mime="text/csv"
-                )
+        else:
+            st.warning("⚠️ No overlapping File + Principle pairs found.")
+            st.write("AI Files Example:", summary_df['File'].unique()[:5])
+            st.write("Human Files Example:", human_long['File'].unique()[:5])
+            st.write("AI Principles Example:", summary_df['Principle'].unique()[:5])
+            st.write("Human Principles Example:", human_long['Principle'].unique()[:5])
+
+            if st.checkbox("Show all non-matching files and principles"):
+                unmatched_files = set(summary_df['File']) - set(human_long['File'])
+                unmatched_principles = set(summary_df['Principle']) - set(human_long['Principle'])
+                st.write("### 🔹 Files in AI results but not in human CSV:")
+                st.write(unmatched_files if unmatched_files else "None")
+                st.write("### 🔹 Principles in AI results but not in human CSV:")
+                st.write(unmatched_principles if unmatched_principles else "None")
