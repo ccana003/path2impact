@@ -1,0 +1,10 @@
+streamlit
+pandas
+pymupdf
+pdfplumber
+beautifulsoup4
+requests
+nltk
+openai
+habanero
+scikit-learn
