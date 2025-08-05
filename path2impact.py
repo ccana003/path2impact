@@ -4,58 +4,179 @@ import tempfile
 import pandas as pd
 import fitz  # PyMuPDF
 import requests
-import pdfplumber
 import re
-from bs4 import BeautifulSoup
 import nltk
 from datetime import datetime
-from openai import OpenAI, OpenAIError
+from openai import OpenAI
 import matplotlib.pyplot as plt
 from sklearn.metrics import cohen_kappa_score
 
 nltk.download('punkt')
 
 # ==============================================
-# STREAMLIT: PATH2IMPACT
+# Streamlit Page Setup
 # ==============================================
-st.title("📊 Path2Impact - Principle Scoring Tool")
+st.set_page_config(
+    page_title="Path2Impact: Principle Scoring Tool",
+    page_icon="📊",
+    layout="wide"
+)
 
-# -------------------------------
+st.markdown(
+    """
+    <style>
+    .big-title {
+        font-size: 38px !important;
+        font-weight: 700;
+        text-align: center;
+        color: #2C3E50;
+        margin-bottom: 5px;
+    }
+    .subtitle {
+        font-size: 20px !important;
+        text-align: center;
+        color: #7F8C8D;
+        margin-bottom: 30px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    """
+    <div style="display:flex; align-items:center; justify-content:center; margin-bottom:30px;">
+        <img src="p2i_logo.png" style="width:80px; margin-right:20px;">
+        <div style="text-align:left;">
+            <div style="font-size:38px; font-weight:700; color:#2C3E50; line-height:1.2;">
+                Translational Principle Scoring
+            </div>
+            <div style="font-size:20px; color:#7F8C8D; margin-top:5px;">
+                Evaluate research publications against NCATS Translational Science Principles
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+st.markdown("---")
+
+# ==============================================
 # 1. API Keys
-# -------------------------------
-st.header("🔑 Step 1: Enter API Keys")
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-dimensions_api_key = st.text_input("Dimensions API Key", type="password")
-redcap_token = st.text_input("REDCap API Token (optional)", type="password")
-unpaywall_email = st.text_input("Unpaywall Email", type="default")
-
-skip_ai = st.checkbox("Skip OpenAI scoring (use cached results if available)")
-
-st.markdown("---")
-
-# -------------------------------
-# 2. Upload Rubrics & Documents
-# -------------------------------
-st.header("📄 Step 2: Upload Rubrics & PDFs")
-
-rubric_files = st.file_uploader("Upload one or more rubric CSVs", type=["csv"], accept_multiple_files=True)
-
-upload_option = st.radio("How would you like to provide your PDFs?",
-                         ["Upload PDF files", "Specify a folder path"])
-
-uploaded_files = []
-folder_path = ""
-pdf_files = []
-
-if upload_option == "Upload PDF files":
-    uploaded_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
-else:
-    folder_path = st.text_input("Enter the folder path containing PDFs")
+# ==============================================
+with st.expander("🔑 Step 1: Enter API Keys", expanded=True):
+    st.info("💡 Enter your OpenAI and optional APIs. Leave blank to test with cached AI results.")
+    openai_api_key = st.text_input("OpenAI API Key", type="password")
+    unpaywall_email = st.text_input("Unpaywall Email (required for DOI fetching)", type="default")
+    skip_ai = st.checkbox("Skip OpenAI scoring (use cached results if available)")
 
 st.markdown("---")
 
 # ==============================================
-# HELPER FUNCTIONS
+# 2. Upload Rubrics & PDFs
+# ==============================================
+with st.expander("📄 Step 2: Upload Rubrics & PDFs", expanded=True):
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        rubric_files = st.file_uploader(
+            "Upload one or more rubric CSVs",
+            type=["csv"],
+            accept_multiple_files=True,
+            help="Upload rubric files to define principles and subcategories."
+        )
+
+    with col2:
+        st.info("💡 Tip: Upload multiple rubric files to evaluate multiple principles at once!")
+
+    upload_option = st.radio(
+        "How would you like to provide your PDFs?",
+        ["Upload PDF files", "Specify a folder path"]
+    )
+
+    uploaded_files, folder_path, pdf_files = [], "", []
+
+    if upload_option == "Upload PDF files":
+        uploaded_files = st.file_uploader(
+            "Upload PDF files",
+            type=["pdf"],
+            accept_multiple_files=True,
+            help="Drag and drop multiple PDFs here for scoring."
+        )
+    else:
+        folder_path = st.text_input(
+            "Enter the folder path containing PDFs",
+            help="Example: PDFs or /workspaces/path2impact/PDFs in Codespaces"
+        )
+
+st.markdown("---")
+
+# ==============================================
+# 3. Optional: Download PDFs via Unpaywall
+# ==============================================
+with st.expander("📥 Step 3: (Optional) Download PDFs via Unpaywall"):
+    st.info("💡 Upload a CSV with DOIs to automatically fetch available PDFs from Unpaywall.")
+
+    doi_csv = st.file_uploader("Upload CSV with DOIs (optional)", type=["csv"])
+    use_unpaywall = st.checkbox("Fetch missing PDFs from Unpaywall using DOIs")
+
+    downloaded_dir = "Downloaded_PDFs"
+    os.makedirs(downloaded_dir, exist_ok=True)
+    downloaded_files = []
+
+    if doi_csv and use_unpaywall:
+        df_dois = pd.read_csv(doi_csv)
+        doi_column = [col for col in df_dois.columns if col.lower() == 'doi']
+
+        if not doi_column:
+            st.error("❌ No 'doi' column found in uploaded CSV.")
+        else:
+            doi_column = doi_column[0]
+            total_dois = len(df_dois[doi_column].dropna())
+            st.write(f"Processing **{total_dois}** DOIs...")
+
+            download_progress = st.progress(0)
+            download_status = st.empty()
+
+            for idx, doi in enumerate(df_dois[doi_column].dropna()):
+                pdf_filename = doi.replace("/", "_") + ".pdf"
+                pdf_path = os.path.join(downloaded_dir, pdf_filename)
+
+                download_progress.progress((idx + 1) / total_dois)
+                download_status.markdown(f"**📥 Fetching DOI:** `{doi}` ({idx+1}/{total_dois})")
+
+                if os.path.exists(pdf_path):
+                    downloaded_files.append(pdf_path)
+                    continue
+
+                api_url = f"https://api.unpaywall.org/v2/{doi}?email={unpaywall_email}"
+                try:
+                    r = requests.get(api_url, timeout=10)
+                    r.raise_for_status()
+                    data = r.json()
+                    pdf_url = data.get('best_oa_location', {}).get('url_for_pdf')
+
+                    if pdf_url:
+                        pdf_resp = requests.get(pdf_url, timeout=15)
+                        if pdf_resp.headers.get('Content-Type', '').lower() == 'application/pdf':
+                            with open(pdf_path, 'wb') as f:
+                                f.write(pdf_resp.content)
+                            downloaded_files.append(pdf_path)
+                            st.success(f"✅ {pdf_filename} downloaded.")
+                        else:
+                            st.warning(f"⚠️ {doi} has no direct PDF link.")
+                    else:
+                        st.warning(f"⚠️ No Open Access PDF for DOI {doi}.")
+                except Exception as e:
+                    st.error(f"❌ Failed to fetch {doi}: {e}")
+
+            pdf_files.extend(downloaded_files)
+            st.success(f"✅ Downloaded {len(downloaded_files)} PDFs from {total_dois} DOIs.")
+
+st.markdown("---")
+
+# ==============================================
+# Helper Functions
 # ==============================================
 CACHE_DIR = "cache"
 OUTPUT_DIR = "outputs"
@@ -164,12 +285,13 @@ def dummy_openai_score(prompt):
 
 
 # ==============================================
-# 3. PROCESS PDFs
+# 4. Run Analysis
 # ==============================================
 if st.button("🚀 Run Analysis"):
     if not rubric_files:
         st.error("Please upload at least one rubric CSV.")
     else:
+        # Collect PDFs
         if upload_option == "Upload PDF files" and uploaded_files:
             tmp_dir = tempfile.mkdtemp()
             for uploaded_file in uploaded_files:
@@ -199,7 +321,7 @@ if st.button("🚀 Run Analysis"):
 
             for pdf_file in pdf_files:
                 pdf_name = os.path.basename(pdf_file)
-                text, sections = extract_text_from_pdf(pdf_file), None
+                text = extract_text_from_pdf(pdf_file)
                 sections = extract_sections(text)
 
                 for principle_name, rubric_df in rubrics:
@@ -207,25 +329,24 @@ if st.button("🚀 Run Analysis"):
 
                     for _, row in rubric_df.iterrows():
                         subcat, scoring, keywords, where = row["Subcategory"], row["Scoring Criteria"], row["Keywords"], row["Where to Search"]
-                        log_placeholder.write(f"Processing {pdf_name} → {principle_name}:{subcat}")
+                        log_placeholder.markdown(f"**📄 Processing:** `{pdf_name}` → **{principle_name}:{subcat}**")
                         score, rationale = get_cached_score(pdf_name, principle_name, subcat)
 
                         if score is None:
                             if skip_ai:
                                 ai_output = dummy_openai_score("prompt")
                             else:
-                                prompt = generate_prompt(principle_name, subcat, scoring, keywords, sections, where)
                                 try:
+                                    prompt = generate_prompt(principle_name, subcat, scoring, keywords, sections, where)
                                     response = client.chat.completions.create(
                                         model="gpt-4-turbo",
                                         messages=[{"role": "user", "content": prompt}],
                                         temperature=0
                                     )
                                     ai_output = response.choices[0].message.content
-
-                                except OpenAIError as e:
-                                    st.error(f"OpenAI API call failed: {str(e)}")
-                                    ai_output = "Score: 0\Ratioinale: API call failed due to quota or billing issue."
+                                except Exception as e:
+                                    st.error(f"OpenAI API call failed: {e}")
+                                    ai_output = "Score: 0\nRationale: API call failed."
 
                             try:
                                 lines = ai_output.strip().splitlines()
@@ -269,10 +390,10 @@ if st.button("🚀 Run Analysis"):
             st.dataframe(pivot_df)
 
 # ==============================================
-# 4. COHEN'S KAPPA (Always Visible)
+# 5. Cohen's Kappa Comparison
 # ==============================================
 st.markdown("---")
-st.header("📊 Step 4: Optional - Compare with Human Ratings")
+st.header("📊 Step 5: Optional - Compare with Human Ratings")
 
 human_file = st.file_uploader("Upload human rater CSV (optional)", type=["csv"])
 
