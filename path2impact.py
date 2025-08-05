@@ -9,7 +9,7 @@ import re
 from bs4 import BeautifulSoup
 import nltk
 from datetime import datetime
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 import matplotlib.pyplot as plt
 from sklearn.metrics import cohen_kappa_score
 
@@ -215,12 +215,17 @@ if st.button("🚀 Run Analysis"):
                                 ai_output = dummy_openai_score("prompt")
                             else:
                                 prompt = generate_prompt(principle_name, subcat, scoring, keywords, sections, where)
-                                response = client.chat.completions.create(
-                                    model="gpt-4-turbo",
-                                    messages=[{"role": "user", "content": prompt}],
-                                    temperature=0
-                                )
-                                ai_output = response.choices[0].message.content
+                                try:
+                                    response = client.chat.completions.create(
+                                        model="gpt-4-turbo",
+                                        messages=[{"role": "user", "content": prompt}],
+                                        temperature=0
+                                    )
+                                    ai_output = response.choices[0].message.content
+
+                                except OpenAIError as e:
+                                    st.error(f"OpenAI API call failed: {str(e)}")
+                                    ai_output = "Score: 0\Ratioinale: API call failed due to quota or billing issue."
 
                             try:
                                 lines = ai_output.strip().splitlines()
