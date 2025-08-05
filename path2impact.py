@@ -22,44 +22,35 @@ st.set_page_config(
     layout="wide"
 )
 
-st.markdown(
-    """
-    <style>
-    .big-title {
-        font-size: 38px !important;
-        font-weight: 700;
-        text-align: center;
-        color: #2C3E50;
-        margin-bottom: 5px;
-    }
-    .subtitle {
-        font-size: 20px !important;
-        text-align: center;
-        color: #7F8C8D;
-        margin-bottom: 30px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# Full-width container with soft beige background
+import streamlit as st
 
-st.markdown(
-    """
-    <div style="display:flex; align-items:center; justify-content:center; margin-bottom:30px;">
-        <img src="p2i_logo.png" style="width:80px; margin-right:20px;">
-        <div style="text-align:left;">
-            <div style="font-size:38px; font-weight:700; color:#2C3E50; line-height:1.2;">
+# Beige banner container
+# Create a beige background container for the banner
+with st.container():
+
+
+    # Columns inside the beige background
+    col_logo, col_title = st.columns([2, 5])
+
+    with col_logo:
+        st.image("p2i_logo.png", width=100)
+
+    with col_title:
+        st.markdown(
+            """
+            <div style="font-size:38px; font-weight:700; color:#2C3E50; line-height:1.2; ">
                 Translational Principle Scoring
             </div>
-            <div style="font-size:20px; color:#7F8C8D; margin-top:5px;">
+            <div style="font-size:20px; color:#7F8C8D; ">
                 Evaluate research publications against NCATS Translational Science Principles
             </div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-st.markdown("---")
+            """,
+            unsafe_allow_html=True
+        )
+
+    # Close the beige div
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ==============================================
 # 1. API Keys
@@ -75,12 +66,12 @@ st.markdown("---")
 # ==============================================
 # 2. Upload Rubrics & PDFs
 # ==============================================
-with st.expander("📄 Step 2: Upload Rubrics & PDFs", expanded=True):
-    col1, col2 = st.columns([2, 1])
+with st.expander("📄 Step 2: Upload Rubrics & PDFs", expanded=False):
+    col1, col2 = st.columns([4, 1])
 
     with col1:
         rubric_files = st.file_uploader(
-            "Upload one or more rubric CSVs",
+            "2a: Upload one or more rubric CSVs",
             type=["csv"],
             accept_multiple_files=True,
             help="Upload rubric files to define principles and subcategories."
@@ -89,8 +80,10 @@ with st.expander("📄 Step 2: Upload Rubrics & PDFs", expanded=True):
     with col2:
         st.info("💡 Tip: Upload multiple rubric files to evaluate multiple principles at once!")
 
+    st.markdown("<br>", unsafe_allow_html=True)  # Adds visual spacing
+
     upload_option = st.radio(
-        "How would you like to provide your PDFs?",
+        "2b: How would you like to provide your PDFs?",
         ["Upload PDF files", "Specify a folder path"]
     )
 
@@ -114,7 +107,7 @@ st.markdown("---")
 # ==============================================
 # 3. Optional: Download PDFs via Unpaywall
 # ==============================================
-with st.expander("📥 Step 3: (Optional) Download PDFs via Unpaywall"):
+with st.expander("📥 Step 3: (Optional) Download PDFs via Unpaywall", expanded=False):
     st.info("💡 Upload a CSV with DOIs to automatically fetch available PDFs from Unpaywall.")
 
     doi_csv = st.file_uploader("Upload CSV with DOIs (optional)", type=["csv"])
@@ -443,7 +436,7 @@ if human_file:
 
             # Visualization
             st.subheader("📊 Cohen's Kappa Visualization")
-            fig, ax = plt.subplots(figsize=(8, 4))
+            fig, ax = plt.subplots(figsize=(4.5, 2.5))
             ax.bar(kappa_df["Principle"], kappa_df["Cohen's Kappa"], color='skyblue', label="Per Principle Kappa")
             ax.axhline(overall_kappa, color='red', linestyle='--', label=f"Overall Kappa ({overall_kappa:.3f})")
             ax.axhline(0.3, color='green', linestyle=':', label='Significance Threshold (0.3)')
@@ -469,3 +462,63 @@ if human_file:
                 st.write(unmatched_files if unmatched_files else "None")
                 st.write("### 🔹 Principles in AI results but not in human CSV:")
                 st.write(unmatched_principles if unmatched_principles else "None")
+
+# ==============================================
+# 6. Weighted Kappa Visualization
+# ==============================================
+st.markdown("---")
+st.header("📊 Step 6: Weighted Kappa")
+
+if 'ai_summary_df' in st.session_state and human_file:
+    try:
+        from sklearn.metrics import cohen_kappa_score
+        import matplotlib.pyplot as plt
+
+        # Calculate both Unweighted and Weighted Kappa per principle
+        kappa_data = []
+        for principle in compare_df["Principle"].unique():
+            subset = compare_df[compare_df["Principle"] == principle]
+            unweighted = cohen_kappa_score(subset["AI Score"], subset["Human Score"])
+            weighted = cohen_kappa_score(subset["AI Score"], subset["Human Score"], weights="quadratic")
+            kappa_data.append({
+                "Principle": principle,
+                "Unweighted Kappa": round(unweighted, 3),
+                "Weighted Kappa": round(weighted, 3)
+            })
+
+        kappa_chart_df = pd.DataFrame(kappa_data)
+
+        st.subheader("📊 Cohen’s Kappa vs Weighted Kappa (per Principle)")
+        fig, ax = plt.subplots(figsize=(7, 4))
+
+        x = range(len(kappa_chart_df))
+        width = 0.35
+
+        ax.bar(
+            [i - width / 2 for i in x],
+            kappa_chart_df["Unweighted Kappa"],
+            width,
+            label='Unweighted',
+            color='skyblue'
+        )
+        ax.bar(
+            [i + width / 2 for i in x],
+            kappa_chart_df["Weighted Kappa"],
+            width,
+            label='Weighted',
+            color='orange'
+        )
+
+        ax.set_ylabel("Kappa Score")
+        ax.set_title("Agreement Between AI and Human Raters")
+        ax.set_xticks(x)
+        ax.set_xticklabels(kappa_chart_df["Principle"], rotation=45, ha='right')
+        ax.set_ylim(-0.1, 1.0)
+        ax.legend()
+
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.warning(f"Unable to render Weighted Kappa chart: {e}")
+else:
+    st.info("Run the comparison step and upload a human ratings file to view this chart.")
