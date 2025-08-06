@@ -383,10 +383,10 @@ if st.button("🚀 Run Analysis"):
             st.dataframe(pivot_df)
 
 # ==============================================
-# 5. Cohen's Kappa Comparison
+# 5 & 6. Cohen's Kappa Comparison (Unweighted + Weighted)
 # ==============================================
 st.markdown("---")
-st.header("📊 Step 5: Optional - Compare with Human Ratings")
+st.header("📊 Step 5 & 6: AI vs Human Ratings (Cohen's Kappa)")
 
 human_file = st.file_uploader("Upload human rater CSV (optional)", type=["csv"])
 
@@ -394,6 +394,11 @@ if human_file:
     if 'ai_summary_df' not in st.session_state:
         st.warning("⚠️ Please run AI analysis first before uploading human ratings.")
     else:
+        import numpy as np
+        from sklearn.metrics import cohen_kappa_score
+        import matplotlib.pyplot as plt
+
+        # --- Load and normalize human ratings ---
         human_df = pd.read_csv(human_file)
         st.write("Preview of Human Ratings:")
         st.dataframe(human_df.head())
@@ -401,6 +406,7 @@ if human_file:
         if 'File' not in human_df.columns and 'publication' in human_df.columns:
             human_df.rename(columns={'publication': 'File'}, inplace=True)
 
+        # Melt wide → long format if needed
         if 'Principle' not in human_df.columns:
             human_long = human_df.melt(id_vars=['File'], var_name='Principle', value_name='Human Score')
         else:
@@ -410,43 +416,122 @@ if human_file:
                 human_long.rename(columns={last_col: 'Human Score'}, inplace=True)
 
         human_long = human_long.dropna(subset=['Human Score'])
-        human_long['File'] = human_long['File'].astype(str).str.strip().str.replace("\\", "/", regex=False).str.replace(" ", "_")
-        summary_df = st.session_state['ai_summary_df'].copy()
-        summary_df['File'] = summary_df['File'].astype(str).str.strip().str.replace("\\", "/", regex=False).str.replace(" ", "_")
 
-        compare_df = pd.merge(summary_df, human_long, on=["File", "Principle"], how="inner").rename(columns={"Total Score": "AI Score"})
+        # Normalize file names for comparison
+        human_long['File'] = (
+            human_long['File'].astype(str)
+            .str.strip()
+            .str.replace("\\", "/", regex=False)
+            .str.replace(" ", "_")
+        )
+        summary_df = st.session_state['ai_summary_df'].copy()
+        summary_df['File'] = (
+            summary_df['File'].astype(str)
+            .str.strip()
+            .str.replace("\\", "/", regex=False)
+            .str.replace(" ", "_")
+        )
+
+        # Merge AI + Human scores
+        compare_df = pd.merge(
+            summary_df,
+            human_long,
+            on=["File", "Principle"],
+            how="inner"
+        ).rename(columns={"Total Score": "AI Score"})
+
         st.session_state['compare_df'] = compare_df
 
         if not compare_df.empty:
+            # === Side-by-Side Comparison ===
             st.subheader("Side-by-Side Comparison")
             st.dataframe(compare_df)
 
+            # === Compute Kappa Scores (Unweighted & Weighted) ===
             kappa_results = []
             for principle in compare_df["Principle"].unique():
                 subset = compare_df[compare_df["Principle"] == principle]
-                kappa = cohen_kappa_score(subset["AI Score"], subset["Human Score"])
-                kappa_results.append({"Principle": principle, "Cohen's Kappa": round(kappa, 3)})
+
+                # Unweighted Kappa
+                unweighted = cohen_kappa_score(subset["AI Score"], subset["Human Score"])
+                if np.isnan(unweighted):
+                    if (subset["AI Score"].values == subset["Human Score"].values).all():
+                        unweighted = 1.0
+                    else:
+                        unweighted = 0.0
+
+                # Weighted Kappa (quadratic)
+                weighted = cohen_kappa_score(subset["AI Score"], subset["Human Score"], weights="quadratic")
+                if np.isnan(weighted):
+                    if (subset["AI Score"].values == subset["Human Score"].values).all():
+                        weighted = 1.0
+                    else:
+                        weighted = 0.0
+
+                kappa_results.append({
+                    "Principle": principle,
+                    "Unweighted Kappa": round(unweighted, 3),
+                    "Weighted Kappa": round(weighted, 3)
+                })
 
             kappa_df = pd.DataFrame(kappa_results)
-            st.subheader("Cohen's Kappa by Principle")
+            st.subheader("📊 Cohen's Kappa (Unweighted vs Weighted)")
             st.dataframe(kappa_df)
 
+            # Overall Kappa (Unweighted + Weighted)
             overall_kappa = cohen_kappa_score(compare_df["AI Score"], compare_df["Human Score"])
-            st.success(f"Overall Cohen's Kappa: {round(overall_kappa, 3)}")
+            if np.isnan(overall_kappa):
+                if (compare_df["AI Score"].values == compare_df["Human Score"].values).all():
+                    overall_kappa = 1.0
+                else:
+                    overall_kappa = 0.0
 
-            # Visualization
-            st.subheader("📊 Cohen's Kappa Visualization")
-            fig, ax = plt.subplots(figsize=(4.5, 2.5))
-            ax.bar(kappa_df["Principle"], kappa_df["Cohen's Kappa"], color='skyblue', label="Per Principle Kappa")
-            ax.axhline(overall_kappa, color='red', linestyle='--', label=f"Overall Kappa ({overall_kappa:.3f})")
-            ax.axhline(0.3, color='green', linestyle=':', label='Significance Threshold (0.3)')
-            ax.set_ylabel("Cohen's Kappa")
-            ax.set_xlabel("Principle")
-            ax.set_ylim(-0.1, 1.0)
-            ax.set_title("Cohen's Kappa Agreement by Principle")
-            plt.xticks(rotation=45, ha='right')
-            ax.legend()
-            st.pyplot(fig)
+            overall_weighted = cohen_kappa_score(
+                compare_df["AI Score"], compare_df["Human Score"], weights="quadratic"
+            )
+            if np.isnan(overall_weighted):
+                if (compare_df["AI Score"].values == compare_df["Human Score"].values).all():
+                    overall_weighted = 1.0
+                else:
+                    overall_weighted = 0.0
+
+            st.success(f"Overall Cohen's Kappa: {round(overall_kappa, 3)} | Weighted: {round(overall_weighted, 3)}")
+
+            # === Compact Visuals ===
+            with st.container():
+                st.subheader("📊 Kappa Scores Visualization (Compact)")
+
+                fig, ax = plt.subplots(figsize=(6, 3))
+                x = range(len(kappa_df))
+                width = 0.35
+
+                ax.bar(
+                    [i - width / 2 for i in x],
+                    kappa_df["Unweighted Kappa"],
+                    width,
+                    label='Unweighted',
+                    color='skyblue'
+                )
+                ax.bar(
+                    [i + width / 2 for i in x],
+                    kappa_df["Weighted Kappa"],
+                    width,
+                    label='Weighted',
+                    color='orange'
+                )
+
+                ax.axhline(overall_kappa, color='red', linestyle='--', label=f"Overall Unweighted ({overall_kappa:.3f})")
+                ax.axhline(overall_weighted, color='purple', linestyle='--', label=f"Overall Weighted ({overall_weighted:.3f})")
+
+                ax.set_ylabel("Kappa Score")
+                ax.set_xlabel("Principle")
+                ax.set_ylim(-0.1, 1.0)
+                ax.set_title("AI vs Human Agreement by Principle")
+                ax.set_xticks(list(x))
+                ax.set_xticklabels(kappa_df["Principle"], rotation=45, ha='right')
+                ax.legend()
+
+                st.pyplot(fig)
 
         else:
             st.warning("⚠️ No overlapping File + Principle pairs found.")
@@ -455,70 +540,46 @@ if human_file:
             st.write("AI Principles Example:", summary_df['Principle'].unique()[:5])
             st.write("Human Principles Example:", human_long['Principle'].unique()[:5])
 
-            if st.checkbox("Show all non-matching files and principles"):
-                unmatched_files = set(summary_df['File']) - set(human_long['File'])
-                unmatched_principles = set(summary_df['Principle']) - set(human_long['Principle'])
-                st.write("### 🔹 Files in AI results but not in human CSV:")
-                st.write(unmatched_files if unmatched_files else "None")
-                st.write("### 🔹 Principles in AI results but not in human CSV:")
-                st.write(unmatched_principles if unmatched_principles else "None")
+# ==============================================
+# 7. Generate Translational Polygon + Year Trend
+# ==============================================
+import re
+from translational_polygon import generate_polygon_from_results
 
-# ==============================================
-# 6. Weighted Kappa Visualization
-# ==============================================
 st.markdown("---")
-st.header("📊 Step 6: Weighted Kappa")
+st.header("📈 Step 7: Generate Translational Polygon & Year Trends")
 
-if 'ai_summary_df' in st.session_state and human_file:
-    try:
-        from sklearn.metrics import cohen_kappa_score
-        import matplotlib.pyplot as plt
-
-        # Calculate both Unweighted and Weighted Kappa per principle
-        kappa_data = []
-        for principle in compare_df["Principle"].unique():
-            subset = compare_df[compare_df["Principle"] == principle]
-            unweighted = cohen_kappa_score(subset["AI Score"], subset["Human Score"])
-            weighted = cohen_kappa_score(subset["AI Score"], subset["Human Score"], weights="quadratic")
-            kappa_data.append({
-                "Principle": principle,
-                "Unweighted Kappa": round(unweighted, 3),
-                "Weighted Kappa": round(weighted, 3)
-            })
-
-        kappa_chart_df = pd.DataFrame(kappa_data)
-
-        st.subheader("📊 Cohen’s Kappa vs Weighted Kappa (per Principle)")
-        fig, ax = plt.subplots(figsize=(7, 4))
-
-        x = range(len(kappa_chart_df))
-        width = 0.35
-
-        ax.bar(
-            [i - width / 2 for i in x],
-            kappa_chart_df["Unweighted Kappa"],
-            width,
-            label='Unweighted',
-            color='skyblue'
-        )
-        ax.bar(
-            [i + width / 2 for i in x],
-            kappa_chart_df["Weighted Kappa"],
-            width,
-            label='Weighted',
-            color='orange'
-        )
-
-        ax.set_ylabel("Kappa Score")
-        ax.set_title("Agreement Between AI and Human Raters")
-        ax.set_xticks(x)
-        ax.set_xticklabels(kappa_chart_df["Principle"], rotation=45, ha='right')
-        ax.set_ylim(-0.1, 1.0)
-        ax.legend()
-
-        st.pyplot(fig)
-
-    except Exception as e:
-        st.warning(f"Unable to render Weighted Kappa chart: {e}")
+if 'ai_pivot_df' not in st.session_state:
+    st.warning("⚠️ Please run the analysis first to generate results.")
 else:
-    st.info("Run the comparison step and upload a human ratings file to view this chart.")
+    pivot_df = st.session_state['ai_pivot_df'].copy()
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+    csv_path = os.path.join(output_dir, "analysis_results.csv")
+    pivot_df.to_csv(csv_path, index=False)
+    st.success(f"Results saved to {csv_path}")
+
+    # Year Trend Visualization inside a container
+    if 'Year' in pivot_df.columns:
+        with st.container():
+            st.subheader("📈 Average Principle Scores by Year")
+            numeric_cols = pivot_df.select_dtypes(include='number').columns.drop('Year')
+            trend_df = pivot_df.groupby('Year')[numeric_cols].mean().reset_index()
+
+            fig, ax = plt.subplots(figsize=(7, 3))
+            for col in numeric_cols:
+                ax.plot(trend_df['Year'], trend_df[col], marker='o', label=col)
+            ax.set_xlabel("Publication Year")
+            ax.set_ylabel("Average Score")
+            ax.set_title("Average Principle Scores Over Time")
+            ax.legend()
+            st.pyplot(fig)
+
+    # Generate polygon (saves to PNG, SVG, PDF)
+    save_base = os.path.join(output_dir, "translational_polygon")
+    generate_polygon_from_results(
+        csv_file=csv_path,
+        year_column="Year" if 'Year' in pivot_df.columns else None,
+        save_path=save_base
+    )
+    st.success(f"✅ Translational polygon generated and saved as PNG, SVG, and PDF in {output_dir}")
