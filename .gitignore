@@ -1,0 +1,33 @@
+# --- Project data ---
+PDFs/
+Downloaded_PDFs/
+outputs/
+cache/
+*.zip
+*.pptx
+
+# --- Python / build ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# --- Notebooks / checkpoints ---
+.ipynb_checkpoints/
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Logs / misc ---
+*.log
