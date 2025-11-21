@@ -65,6 +65,11 @@ with st.expander("🔑 Step 1: Enter API Keys / Run Settings", expanded=True):
 
 st.markdown("---")
 
+ai_enabled = (not skip_ai) and bool(openai_api_key)
+model_name = "gpt-4-turbo"  # keep in sync with Step 4 call
+mode_badge = "🧠 AI (OpenAI)" if ai_enabled else "🧩 Heuristic only"
+st.info(f"Run mode: **{mode_badge}**" + (f" — model: `{model_name}`" if ai_enabled else ""))
+
 # ==============================================
 # 2. Upload Rubrics & PDFs
 # ==============================================
@@ -328,6 +333,8 @@ if st.button("🚀 Run Analysis"):
         st.error("Please upload at least one rubric CSV.")
     else:
         # Collect PDFs
+        pdf_files = []
+
         if upload_option == "Upload PDF files" and uploaded_files:
             tmp_dir = tempfile.mkdtemp()
             for uploaded_file in uploaded_files:
@@ -335,17 +342,31 @@ if st.button("🚀 Run Analysis"):
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.read())
                 pdf_files.append(file_path)
+
         elif upload_option == "Specify a folder path" and os.path.isdir(folder_path):
-            pdf_files = [os.path.join(folder_path, f)
-                         for f in os.listdir(folder_path) if f.lower().endswith(".pdf")]
+            pdf_files = [
+                os.path.join(folder_path, f)
+                for f in os.listdir(folder_path)
+                if f.lower().endswith(".pdf")
+            ]
 
         if not pdf_files:
             st.error("No PDF files found. Please upload or provide a valid folder path.")
         else:
             st.success(f"Found {len(pdf_files)} PDF files. Starting analysis...")
 
+            # --- Provenance setup ---
+            run_started = datetime.now().isoformat(timespec="seconds")
+            ai_enabled = (not skip_ai) and bool(openai_api_key)
+            model_name = "gpt-4-turbo"
+
+            ai_calls = 0
+            ai_failures = 0
+            heuristic_calls = 0
+            ai_events = []   # per-subcategory log
+
             client = None
-            if not skip_ai and openai_api_key:
+            if ai_enabled:
                 client = OpenAI(api_key=openai_api_key)
 
             # Load rubrics and track subcategory counts per principle (for correct max normalization)
@@ -379,39 +400,76 @@ if st.button("🚀 Run Analysis"):
                         keywords = row.get("Keywords", "")
                         where = row.get("Where to Search", "")
 
-                        log_placeholder.markdown(f"**📄 Processing:** `{pdf_name}` → **{principle_name}:{subcat}**")
+                        log_placeholder.markdown(
+                            f"**📄 Processing:** `{pdf_name}` → **{principle_name}:{subcat}**"
+                        )
 
                         # Cache
-                        score, rationale = get_cached_score(pdf_name, principle_name, subcat, bypass=bypass_cache)
+                        score, rationale = get_cached_score(
+                            pdf_name, principle_name, subcat, bypass=bypass_cache
+                        )
 
                         if score is None:
-                            if skip_ai or not client:
-                                # deterministic heuristic
-                                score, rationale = heuristic_score_from_keywords(keywords, where, sections)
+                            if not ai_enabled or not client:
+                                # --- Heuristic path ---
+                                score, rationale = heuristic_score_from_keywords(
+                                    keywords, where, sections
+                                )
+                                heuristic_calls += 1
+                                ai_events.append({
+                                    "file": pdf_name,
+                                    "principle": principle_name,
+                                    "subcat": subcat,
+                                    "engine": "heuristic",
+                                })
                             else:
-                                # OpenAI path
+                                # --- OpenAI path with fallback to heuristic ---
                                 try:
-                                    prompt = generate_prompt(principle_name, subcat, scoring, keywords, sections, where)
-                                    response = client.chat.completions.create(
-                                        model="gpt-4-turbo",
+                                    prompt = generate_prompt(
+                                        principle_name, subcat, scoring,
+                                        keywords, sections, where
+                                    )
+                                    resp = client.chat.completions.create(
+                                        model=model_name,
                                         messages=[{"role": "user", "content": prompt}],
                                         temperature=0
                                     )
-                                    ai_output = response.choices[0].message.content
-                                except Exception as e:
-                                    st.error(f"OpenAI API call failed: {e}")
-                                    ai_output = "Score: 0\nRationale: API call failed."
+                                    ai_output = resp.choices[0].message.content
 
-                                if not (skip_ai or not client):
-                                    # parse OpenAI output
-                                    try:
-                                        lines = ai_output.strip().splitlines()
-                                        score_line = [l for l in lines if l.lower().startswith("score")][0]
-                                        rationale_line = [l for l in lines if l.lower().startswith("rationale")][0]
-                                        score = int(re.search(r'\d', score_line).group())
-                                        rationale = rationale_line.split(":", 1)[1].strip()
-                                    except Exception:
-                                        score, rationale = 0, "Parsing error."
+                                    # Parse output
+                                    lines = ai_output.strip().splitlines()
+                                    score_line = [
+                                        l for l in lines if l.lower().startswith("score")
+                                    ][0]
+                                    rationale_line = [
+                                        l for l in lines if l.lower().startswith("rationale")
+                                    ][0]
+                                    score = int(re.search(r'\d', score_line).group())
+                                    rationale = rationale_line.split(":", 1)[1].strip()
+
+                                    ai_calls += 1
+                                    ai_events.append({
+                                        "file": pdf_name,
+                                        "principle": principle_name,
+                                        "subcat": subcat,
+                                        "engine": "openai",
+                                    })
+                                except Exception as e:
+                                    ai_failures += 1
+                                    st.warning(
+                                        f"OpenAI error → falling back to heuristic for "
+                                        f"{pdf_name} • {principle_name}:{subcat} — {e}"
+                                    )
+                                    score, rationale = heuristic_score_from_keywords(
+                                        keywords, where, sections
+                                    )
+                                    heuristic_calls += 1
+                                    ai_events.append({
+                                        "file": pdf_name,
+                                        "principle": principle_name,
+                                        "subcat": subcat,
+                                        "engine": "heuristic_fallback",
+                                    })
 
                             save_to_cache(pdf_name, principle_name, subcat, score, rationale)
 
@@ -438,7 +496,9 @@ if st.button("🚀 Run Analysis"):
 
             summary_df = pd.DataFrame(summary_results)
             st.session_state['ai_summary_df'] = summary_df.copy()
-            pivot_df = summary_df.pivot(index="File", columns="Principle", values="Total Score").reset_index()
+            pivot_df = summary_df.pivot(
+                index="File", columns="Principle", values="Total Score"
+            ).reset_index()
             st.session_state['ai_pivot_df'] = pivot_df.copy()
             st.success("✅ Analysis complete! Results stored in session state.")
             st.subheader("Summary (Wide Form: One Row Per PDF)")
@@ -451,6 +511,39 @@ if st.button("🚀 Run Analysis"):
                     st.dataframe(_tmp.tail(20))
                 except Exception as e:
                     st.info(f"Couldn't read cache: {e}")
+
+            # --- Run provenance summary ---
+            st.subheader("Run provenance")
+            st.write({
+                "mode": ("AI (OpenAI)" if ai_enabled else "Heuristic only"),
+                "model": (model_name if ai_enabled else None),
+                "ai_calls": ai_calls,
+                "ai_failures": ai_failures,
+                "heuristic_calls": heuristic_calls,
+                "started": run_started,
+                "ended": datetime.now().isoformat(timespec="seconds"),
+            })
+
+            # Save provenance JSON
+            try:
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                prov_path = os.path.join(OUTPUT_DIR, "run_provenance.json")
+                import json
+                with open(prov_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "mode": ("AI" if ai_enabled else "Heuristic"),
+                        "model": (model_name if ai_enabled else None),
+                        "ai_calls": ai_calls,
+                        "ai_failures": ai_failures,
+                        "heuristic_calls": heuristic_calls,
+                        "events": ai_events,
+                        "started": run_started,
+                        "ended": datetime.now().isoformat(timespec="seconds"),
+                    }, f, ensure_ascii=False, indent=2)
+                st.caption(f"Provenance saved to {prov_path}")
+            except Exception as e:
+                st.warning(f"Could not save provenance JSON: {e}")
+                  
 
 # ==============================================
 # 5 & 6. Cohen's Kappa Comparison (Unweighted + Weighted)
