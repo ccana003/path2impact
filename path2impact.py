@@ -10,6 +10,7 @@ from datetime import datetime
 from openai import OpenAI
 import matplotlib.pyplot as plt
 from sklearn.metrics import cohen_kappa_score
+import time
 
 nltk.download('punkt')
 
@@ -66,7 +67,7 @@ with st.expander("🔑 Step 1: Enter API Keys / Run Settings", expanded=True):
 st.markdown("---")
 
 ai_enabled = (not skip_ai) and bool(openai_api_key)
-model_name = "gpt-4-turbo"  # keep in sync with Step 4 call
+model_name = "gpt-4o-mini"  # keep in sync with Step 4 call
 mode_badge = "🧠 AI (OpenAI)" if ai_enabled else "🧩 Heuristic only"
 st.info(f"Run mode: **{mode_badge}**" + (f" — model: `{model_name}`" if ai_enabled else ""))
 
@@ -233,6 +234,12 @@ def generate_prompt(principle_name, subcat, scoring, keywords, sections, where_t
     for part in search_parts:
         if part in sections:
             collected_text += f"[{part}]\n{sections[part]}\n"
+
+    # Hard cap the text length to keep tokens under control
+    MAX_CHARS = 6000
+    if len(collected_text) > MAX_CHARS:
+        collected_text = collected_text[:MAX_CHARS] + "\n...[truncated]"
+
     return f"""
 You are evaluating whether a research publication demonstrates the principle '{principle_name}',
 focusing on subcategory '{subcat}'.
@@ -325,6 +332,32 @@ def dummy_openai_score(prompt):
     # kept for completeness; not used when heuristic is enabled
     return "Score: 1\nRationale: Placeholder scoring for testing."
 
+def call_openai_with_retry(client, model_name, prompt, max_retries=4):
+    """
+    Handles OpenAI 429 rate limits by retrying with sleep.
+    Ensures we avoid falling back to heuristic unless all retries fail.
+    """
+    delay = 1.0  # seconds before first retry
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0
+            )
+            return response
+
+        except Exception as e:
+            # Detect rate limit
+            msg = str(e).lower()
+            if "rate limit" in msg or "429" in msg:
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2  # exponential backoff
+                    continue  # retry again
+            # If it's not a rate limit, or retries exhausted → raise
+            raise e
+
 # ==============================================
 # 4. Run Analysis
 # ==============================================
@@ -358,7 +391,7 @@ if st.button("🚀 Run Analysis"):
             # --- Provenance setup ---
             run_started = datetime.now().isoformat(timespec="seconds")
             ai_enabled = (not skip_ai) and bool(openai_api_key)
-            model_name = "gpt-4-turbo"
+            model_name = "gpt-4o-mini"
 
             ai_calls = 0
             ai_failures = 0
@@ -429,11 +462,12 @@ if st.button("🚀 Run Analysis"):
                                         principle_name, subcat, scoring,
                                         keywords, sections, where
                                     )
-                                    resp = client.chat.completions.create(
-                                        model=model_name,
-                                        messages=[{"role": "user", "content": prompt}],
-                                        temperature=0
-                                    )
+                                    try:
+                                        resp = call_openai_with_retry(client, model_name, prompt)
+                                    except Exception as e:
+                                        # This only runs if retries ALSO fail
+                                        raise e
+
                                     ai_output = resp.choices[0].message.content
 
                                     # Parse output
