@@ -332,31 +332,38 @@ def dummy_openai_score(prompt):
     # kept for completeness; not used when heuristic is enabled
     return "Score: 1\nRationale: Placeholder scoring for testing."
 
+import time
+
 def call_openai_with_retry(client, model_name, prompt, max_retries=4):
     """
-    Handles OpenAI 429 rate limits by retrying with sleep.
-    Ensures we avoid falling back to heuristic unless all retries fail.
+    AI-only helper: retries on rate limits instead of immediately failing.
+    If all retries fail, it raises the exception so the run can stop
+    (we do NOT fall back to heuristic in AI mode).
     """
     delay = 1.0  # seconds before first retry
+    last_err = None
+
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0
             )
-            return response
-
+            return resp
         except Exception as e:
-            # Detect rate limit
+            last_err = e
             msg = str(e).lower()
-            if "rate limit" in msg or "429" in msg:
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    delay *= 2  # exponential backoff
-                    continue  # retry again
-            # If it's not a rate limit, or retries exhausted → raise
-            raise e
+            # If this looks like a rate limit, back off and retry
+            if ("rate limit" in msg or "429" in msg) and attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            # Otherwise, or if out of retries, re-raise
+            break
+
+    raise last_err
+
 
 # ==============================================
 # 4. Run Analysis
@@ -390,8 +397,10 @@ if st.button("🚀 Run Analysis"):
 
             # --- Provenance setup ---
             run_started = datetime.now().isoformat(timespec="seconds")
+
+            # 🔹 AI-only vs heuristic-only modes
             ai_enabled = (not skip_ai) and bool(openai_api_key)
-            model_name = "gpt-4o-mini"
+            model_name = "gpt-4o-mini"  # << use high-TPM model
 
             ai_calls = 0
             ai_failures = 0
@@ -443,31 +452,28 @@ if st.button("🚀 Run Analysis"):
                         )
 
                         if score is None:
+                            # ─────────────────────────
+                            # Mode 1: Heuristic-only run
+                            # ─────────────────────────
                             if not ai_enabled or not client:
-                                # --- Heuristic path ---
                                 score, rationale = heuristic_score_from_keywords(
                                     keywords, where, sections
                                 )
                                 heuristic_calls += 1
-                                ai_events.append({
-                                    "file": pdf_name,
-                                    "principle": principle_name,
-                                    "subcat": subcat,
-                                    "engine": "heuristic",
-                                })
+                                engine_label = "heuristic"
+
+                            # ─────────────────────────
+                            # Mode 2: AI-only run (NO fallback)
+                            # ─────────────────────────
                             else:
-                                # --- OpenAI path with fallback to heuristic ---
                                 try:
                                     prompt = generate_prompt(
                                         principle_name, subcat, scoring,
                                         keywords, sections, where
                                     )
-                                    try:
-                                        resp = call_openai_with_retry(client, model_name, prompt)
-                                    except Exception as e:
-                                        # This only runs if retries ALSO fail
-                                        raise e
-
+                                    resp = call_openai_with_retry(
+                                        client, model_name, prompt
+                                    )
                                     ai_output = resp.choices[0].message.content
 
                                     # Parse output
@@ -482,30 +488,25 @@ if st.button("🚀 Run Analysis"):
                                     rationale = rationale_line.split(":", 1)[1].strip()
 
                                     ai_calls += 1
-                                    ai_events.append({
-                                        "file": pdf_name,
-                                        "principle": principle_name,
-                                        "subcat": subcat,
-                                        "engine": "openai",
-                                    })
+                                    engine_label = "openai"
+
                                 except Exception as e:
                                     ai_failures += 1
-                                    st.warning(
-                                        f"OpenAI error → falling back to heuristic for "
-                                        f"{pdf_name} • {principle_name}:{subcat} — {e}"
+                                    # 🚨 IMPORTANT: NO heuristic fallback here
+                                    st.error(
+                                        "OpenAI error in AI-only mode. "
+                                        "Stopping analysis to avoid mixing in heuristic scores.\n\n"
+                                        f"Details: {e}"
                                     )
-                                    score, rationale = heuristic_score_from_keywords(
-                                        keywords, where, sections
-                                    )
-                                    heuristic_calls += 1
-                                    ai_events.append({
-                                        "file": pdf_name,
-                                        "principle": principle_name,
-                                        "subcat": subcat,
-                                        "engine": "heuristic_fallback",
-                                    })
+                                    st.stop()
 
                             save_to_cache(pdf_name, principle_name, subcat, score, rationale)
+                            ai_events.append({
+                                "file": pdf_name,
+                                "principle": principle_name,
+                                "subcat": subcat,
+                                "engine": engine_label,
+                            })
 
                         total_score += int(score)
                         subcat_scores.append(f"{subcat}:{score}")
@@ -549,7 +550,7 @@ if st.button("🚀 Run Analysis"):
             # --- Run provenance summary ---
             st.subheader("Run provenance")
             st.write({
-                "mode": ("AI (OpenAI)" if ai_enabled else "Heuristic only"),
+                "mode": ("AI-only (OpenAI)" if ai_enabled else "Heuristic-only"),
                 "model": (model_name if ai_enabled else None),
                 "ai_calls": ai_calls,
                 "ai_failures": ai_failures,
@@ -565,7 +566,7 @@ if st.button("🚀 Run Analysis"):
                 import json
                 with open(prov_path, "w", encoding="utf-8") as f:
                     json.dump({
-                        "mode": ("AI" if ai_enabled else "Heuristic"),
+                        "mode": ("AI-only" if ai_enabled else "Heuristic-only"),
                         "model": (model_name if ai_enabled else None),
                         "ai_calls": ai_calls,
                         "ai_failures": ai_failures,
@@ -577,7 +578,7 @@ if st.button("🚀 Run Analysis"):
                 st.caption(f"Provenance saved to {prov_path}")
             except Exception as e:
                 st.warning(f"Could not save provenance JSON: {e}")
-                  
+              
 
 # ==============================================
 # 5 & 6. Cohen's Kappa Comparison (Unweighted + Weighted)
